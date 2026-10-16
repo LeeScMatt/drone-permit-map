@@ -24,14 +24,15 @@
   .item .fail { color: #c00; }
   #map { flex: 1; position: relative; min-height: 300px; }
   #footer { font-size: 11px; color: #777; padding: 4px 8px; background: #fafafa; border-top: 1px solid #eee; }
+  #legendBtn { position: fixed; left: 10px; bottom: 36px; z-index: 1000; background: #333; color: #fff; border: 0; padding: 9px 14px; border-radius: 4px; font-size: 14px; }
+  #legendPopup { position: fixed; left: 10px; bottom: 84px; z-index: 1000; background: #fff; padding: 10px; border-radius: 6px; box-shadow: 0 2px 10px rgba(0,0,0,.3); width: 270px; max-height: 60vh; overflow-y: auto; }
+  #legendPopup p { margin: 0; }
+  #legendPopup .btns { display: flex; justify-content: space-between; margin-bottom: 8px; }
+  #legendPopup label { display: block; padding: 3px 0; }
 </style>
 </head>
 <body>
 <div id="panel">
-  <details>
-    <summary>지도 레이어 (공역 표시)</summary>
-    <div id="layerBox"></div>
-  </details>
   <label>신청 구역 입력 (한 줄에 하나)<br>
     주소만: <code>경기도 여주시 강천면 강천리 645</code><br>
     좌표+반경: <code>37.2268, 127.7224, 300</code> (위도, 경도, 반경 m)
@@ -46,6 +47,15 @@
 </div>
 <div id="map"></div>
 <div id="footer">출처: 국토교통부 (공공데이터포털) 비행제한구역 · 배경지도: 브이월드. 참고용이며 실제 비행 전 공식 확인이 필요합니다.</div>
+ 
+<button id="legendBtn">☰ 범례</button>
+<div id="legendPopup" style="display:none">
+  <div class="btns">
+    <button id="toggleAll">전체 해제</button>
+    <button id="closeLegend">닫기</button>
+  </div>
+  <div id="layerBox"></div>
+</div>
  
 <script src="https://cdn.jsdelivr.net/npm/ol@9.2.4/dist/ol.js"></script>
 <script>
@@ -214,6 +224,22 @@ function buildBaseSwitch() {
   });
 }
 buildBaseSwitch();
+ 
+// 범례 팝업 열기/닫기, 전체 해제/선택
+$("legendBtn").onclick = () => {
+  const pop = $("legendPopup");
+  pop.style.display = pop.style.display === "none" ? "block" : "none";
+};
+$("closeLegend").onclick = () => { $("legendPopup").style.display = "none"; };
+let allOn = true;
+$("toggleAll").onclick = () => {
+  allOn = !allOn;
+  document.querySelectorAll("#layerBox input[type=checkbox]").forEach((cb, i) => {
+    cb.checked = allOn;
+    restrictLayers[i].setVisible(allOn);
+  });
+  $("toggleAll").textContent = allOn ? "전체 해제" : "전체 선택";
+};
  
 // ===== 실행 =====
 $("run").onclick = async () => {
