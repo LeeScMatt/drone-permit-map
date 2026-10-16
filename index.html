@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#1f6feb">
+<title>드론 비행 신청 지도</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/ol@9.2.4/ol.css">
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; font-family: "Malgun Gothic", "Apple SD Gothic Neo", sans-serif; font-size: 14px; }
+  body { display: flex; flex-direction: column; }
+  #panel { background: #fff; border-bottom: 1px solid #ddd; padding: 8px; display: flex; flex-direction: column; gap: 6px; max-height: 45vh; overflow: auto; }
+  #panel textarea { width: 100%; height: 80px; font-size: 12px; font-family: monospace; }
+  .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  button { padding: 7px 12px; cursor: pointer; }
+  label { font-size: 12px; color: #555; }
+  #status { font-size: 12px; color: #555; min-height: 16px; }
+  #list { font-size: 12px; }
+  .item { padding: 5px 4px; border-bottom: 1px solid #eee; cursor: pointer; }
+  .item:hover { background: #eef5ff; }
+  .item .fail { color: #c00; }
+  #map { flex: 1; position: relative; min-height: 300px; }
+  #footer { font-size: 11px; color: #777; padding: 4px 8px; background: #fafafa; border-top: 1px solid #eee; }
+</style>
+</head>
+<body>
+<div id="panel">
+  <label>신청 구역 입력 (한 줄에 하나)<br>
+    주소만: <code>경기도 여주시 강천면 강천리 645</code><br>
+    좌표+반경: <code>37.2268, 127.7224, 300</code> (위도, 경도, 반경 m)
+  </label>
+  <textarea id="input" placeholder="여기에 구역을 한 줄씩 입력하세요."></textarea>
+  <div class="row">
+    <button id="run">지도에 표시</button>
+    <button id="clear">지우기</button>
+    <span id="status"></span>
+  </div>
+  <div id="list"></div>
+</div>
+<div id="map"></div>
+<div id="footer">출처: 국토교통부 (공공데이터포털) 비행제한구역 · 배경지도: 브이월드. 참고용이며 실제 비행 전 공식 확인이 필요합니다.</div>
+ 
+<script src="https://cdn.jsdelivr.net/npm/ol@9.2.4/dist/ol.js"></script>
+<script>
+// ===== 설정 =====
+// 브이월드 API 인증키 (발급 시 등록한 서비스 URL과 현재 접속 주소가 같아야 합니다)
+const VWORLD_KEY = "여기에_브이월드_인증키";
+// 비행제한구역 WFS 레이어명 (브이월드 API 레퍼런스에서 확인 후 입력)
+const RESTRICT_LAYER = "여기에_비행제한구역_레이어명";
+ 
+const $ = id => document.getElementById(id);
+const setStatus = t => { $("status").textContent = t; };
+ 
+// ===== 지도 =====
+const zoneSource = new ol.source.Vector();
+const restrictSource = new ol.source.Vector();
+ 
+const map = new ol.Map({
+  target: "map",
+  layers: [
+    new ol.layer.Tile({
+      source: new ol.source.XYZ({
+        url: `https://api.vworld.kr/req/wmts/1.0.0/${VWORLD_KEY}/Base/{z}/{y}/{x}.png`,
+        attributions: "© 브이월드"
+      })
+    }),
+    new ol.layer.Vector({ source: restrictSource, style: new ol.style.Style({
+      fill: new ol.style.Fill({ color: "rgba(255,0,0,0.15)" }),
+      stroke: new ol.style.Stroke({ color: "rgba(220,0,0,0.8)", width: 1.5 })
+    }) }),
+    new ol.layer.Vector({ source: zoneSource, style: new ol.style.Style({
+      fill: new ol.style.Fill({ color: "rgba(31,111,235,0.25)" }),
+      stroke: new ol.style.Stroke({ color: "#1f6feb", width: 2 }),
+      image: new ol.style.Circle({ radius: 6, fill: new ol.style.Fill({ color: "#1f6feb" }), stroke: new ol.style.Stroke({ color: "#fff", width: 2 }) })
+    }) })
+  ],
+  view: new ol.View({ center: ol.proj.fromLonLat([127.8, 36.5]), zoom: 7 })
+});
+ 
+// 구역 하나를 지도에 그림 (반경이 있으면 원, 없으면 점)
+function drawZone(lon, lat, radius, label) {
+  const center = [lon, lat];
+  let feature;
+  if (radius && radius > 0) {
+    const poly = ol.geom.Polygon.circular(center, radius, 64).transform("EPSG:4326", "EPSG:3857");
+    feature = new ol.Feature({ geometry: poly });
+  } else {
+    feature = new ol.Feature({ geometry: new ol.geom.Point(ol.proj.fromLonLat(center)) });
+  }
+  feature.set("label", label);
+  zoneSource.addFeature(feature);
+  return feature;
+}
+ 
+// ===== 입력 파싱 & 주소 → 좌표 (브이월드 주소 검색) =====
+function parseLine(line) {
+  const nums = line.split(",").map(s => s.trim());
+  if (nums.length >= 2 && !isNaN(nums[0]) && !isNaN(nums[1]) && nums[0] !== "" && nums[1] !== "") {
+    return { lat: +nums[0], lon: +nums[1], radius: nums[2] ? +nums[2] : 0, addr: `${nums[0]}, ${nums[1]}` };
+  }
+  return { addr: line };
+}
+ 
+async function geocodeAddress(addr) {
+  for (const type of ["ROAD", "PARCEL"]) {
+    const url = `https://api.vworld.kr/req/address?service=address&request=getcoord&version=2.0&crs=epsg:4326` +
+      `&address=${encodeURIComponent(addr)}&refine=true&simple=false&format=json&type=${type}&key=${VWORLD_KEY}`;
+    try {
+      const r = await fetch(url);
+      const j = await r.json();
+      if (j.response && j.response.status === "OK") {
+        const p = j.response.result.point;
+        return { lon: +p.x, lat: +p.y };
+      }
+    } catch (e) { /* 다음 타입 시도 */ }
+  }
+  return null;
+}
+ 
+// ===== 비행제한구역 레이어 (WFS) =====
+async function loadRestrictions() {
+  if (RESTRICT_LAYER.startsWith("여기에")) {
+    setStatus("비행제한구역 레이어명을 설정하면 겹쳐 보기가 켜집니다.");
+    return;
+  }
+  const ext = map.getView().calculateExtent(map.getSize());
+  const [minX, minY, maxX, maxY] = ol.proj.transformExtent(ext, "EPSG:3857", "EPSG:4326");
+  const url = `https://api.vworld.kr/req/wfs?service=WFS&version=2.0.0&request=GetFeature` +
+    `&typename=${encodeURIComponent(RESTRICT_LAYER)}&srsName=EPSG:4326&output=application/json` +
+    `&bbox=${minY},${minX},${maxY},${maxX},EPSG:4326&key=${VWORLD_KEY}`;
+  try {
+    const r = await fetch(url);
+    const geo = await r.json();
+    restrictSource.clear();
+    restrictSource.addFeatures(new ol.format.GeoJSON().readFeatures(geo, {
+      dataProjection: "EPSG:4326", featureProjection: "EPSG:3857"
+    }));
+  } catch (e) {
+    setStatus("비행제한구역 불러오기 실패: 레이어명/키/서비스 URL 확인 필요");
+  }
+}
+ 
+// ===== 실행 =====
+$("run").onclick = async () => {
+  const lines = $("input").value.split("\n").map(l => l.trim()).filter(Boolean);
+  if (!lines.length) return setStatus("입력된 구역이 없습니다.");
+  zoneSource.clear();
+  $("list").innerHTML = "";
+  let ok = 0, fail = 0;
+  const extent = ol.extent.createEmpty();
+ 
+  for (let i = 0; i < lines.length; i++) {
+    const p = parseLine(lines[i]);
+    setStatus(`처리 중... ${i + 1}/${lines.length}`);
+    let lon = p.lon, lat = p.lat;
+    if (lat === undefined) {
+      const g = await geocodeAddress(p.addr);
+      if (g) { lon = g.lon; lat = g.lat; }
+    }
+    const item = document.createElement("div");
+    item.className = "item";
+    item.textContent = `${i + 1}. ${p.addr}`;
+    $("list").appendChild(item);
+ 
+    if (lat === undefined || lon === undefined || isNaN(lat) || isNaN(lon)) {
+      fail++;
+      item.insertAdjacentHTML("beforeend", `<div class="fail">좌표를 찾지 못했습니다</div>`);
+      continue;
+    }
+    ok++;
+    const f = drawZone(lon, lat, p.radius, p.addr);
+    ol.extent.extend(extent, f.getGeometry().getExtent());
+    item.onclick = () => map.getView().fit(f.getGeometry().getExtent(), { maxZoom: 16, padding: [40, 40, 40, 40], duration: 400 });
+  }
+ 
+  if (ok) map.getView().fit(extent, { maxZoom: 16, padding: [40, 40, 40, 40] });
+  setStatus(`완료: 표시 ${ok}건, 실패 ${fail}건`);
+  loadRestrictions();
+};
+ 
+$("clear").onclick = () => { zoneSource.clear(); $("list").innerHTML = ""; setStatus(""); };
+ 
+// 지도 이동이 끝나면 비행제한구역 다시 불러오기
+map.on("moveend", () => { if (!RESTRICT_LAYER.startsWith("여기에")) loadRestrictions(); });
+</script>
+</body>
+</html>
