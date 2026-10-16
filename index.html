@@ -36,10 +36,33 @@
   #addrPopup input { width: 100%; padding: 8px; font-size: 14px; }
   #addrPopup .btns { display: flex; gap: 6px; margin-top: 8px; }
   #addrMsg { font-size: 12px; color: #555; margin-top: 6px; }
+  #recList { max-height: 220px; overflow-y: auto; border: 1px solid #eee; }
+  #recBox textarea { width: 100%; height: 70px; font-size: 12px; font-family: monospace; }
+  #recBox .row { margin: 4px 0; }
+  #recList .addr { color: #555; }
 </style>
 </head>
 <body>
 <div id="panel">
+  <div id="recBox">
+    <label>드론원스톱 목록 표 붙여넣기 (북마클릿으로 복사한 내용, 머리글 포함)</label>
+    <textarea id="listInput" placeholder="북마클릿으로 복사한 목록을 붙여넣으세요."></textarea>
+    <div class="row">
+      <label><input type="checkbox" id="onlyDone" checked> 처리완료만</label>
+      <button id="listImport">목록 가져오기</button>
+    </div>
+    <div class="row">
+      <select id="recFilter">
+        <option value="all">전체</option>
+        <option value="valid">유효기간 내</option>
+        <option value="soon">만료 임박 (30일 이내)</option>
+        <option value="expired">만료</option>
+      </select>
+      <button id="exportBtn">내보내기</button>
+      <input type="file" id="importFile" accept=".json">
+    </div>
+    <div id="recList"></div>
+  </div>
   <label>신청 구역 입력 (한 줄에 하나)<br>
     주소만: <code>경기도 여주시 강천면 강천리 645</code><br>
     좌표+반경: <code>37.2268, 127.7224, 300</code> (위도, 경도, 반경 m)
@@ -78,7 +101,7 @@
 <script>
 // ===== 설정 =====
 // 브이월드 API 인증키 (발급 시 등록한 서비스 URL과 현재 접속 주소가 같아야 합니다)
-const VWORLD_KEY = "68AF6961-7E6D-4B4D-8156-226499F2F7D9";
+const VWORLD_KEY = "여기에_브이월드_인증키";
 // 표시할 공역 레이어 목록 (WMS). on: 처음부터 켤지 여부
 const RESTRICT_LAYERS = [
   { code: "lt_c_aisprhc", name: "비행금지구역", on: true },
@@ -273,6 +296,140 @@ async function doAddrSearch() {
 $("addrGo").onclick = doAddrSearch;
 $("addrInput").onkeydown = e => { if (e.key === "Enter") doAddrSearch(); };
  
+// ===== 신청 목록 가져오기 / 기간 필터 =====
+const REC_KEY = "drone-records-v1";
+let records = [];
+try { records = JSON.parse(localStorage.getItem(REC_KEY)) || []; } catch (e) { records = []; }
+ 
+function saveRecords() {
+  try { localStorage.setItem(REC_KEY, JSON.stringify(records)); }
+  catch (e) { setStatus("브라우저 저장에 실패했습니다. 내보내기로 백업해 주세요."); }
+}
+ 
+// 신청일로부터 1년 뒤 날짜 (YYYY-MM-DD)
+function addOneYear(d) {
+  const [y, m, dd] = d.split("-");
+  return `${Number(y) + 1}-${m}-${dd}`;
+}
+ 
+// 드론원스톱 목록 표(탭 구분) 읽기
+function parseList(text) {
+  const out = [];
+  text.replace(/\r/g, "").split("\n").forEach(line => {
+    const c = line.split("\t").map(x => x.trim());
+    if (c.length < 5) return;
+    const m = c[1].match(/^(\S+)\s*\(\s*(\d{4}-\d{2}-\d{2})\s*\)/);
+    if (!m) return;
+    const id = m[1], applied = m[2];
+    const part = c[2].match(/\(\s*(\d+)\s*\/\s*(\d+)\s*\)/);
+    const zone = c[2].match(/촬영구역:\s*(.*)$/);
+    let addr = zone ? zone[1].trim() : "";
+    let extra = 0;
+    const ex = addr.match(/^(.*?)\s*외\s*(\d+)\s*구역$/);
+    if (ex) { addr = ex[1].trim(); extra = Number(ex[2]); }
+    out.push({
+      key: id + (part ? `-${part[1]}of${part[2]}` : ""),
+      id, applied, validTo: addOneYear(applied),
+      part: part ? `${part[1]}/${part[2]}` : "",
+      status: c[4], dept: c[3], addr, extra
+    });
+  });
+  return out;
+}
+ 
+// 오늘 기준 유효기간 상태
+function periodInfo(r) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const from = new Date(r.applied + "T00:00:00");
+  const to = new Date(r.validTo + "T00:00:00");
+  const left = Math.round((to - today) / 86400000);
+  const active = today >= from && today <= to;
+  let label;
+  if (today < from) label = "신청 예정";
+  else if (active) label = `유효 (D-${left})`;
+  else label = "만료";
+  return { label, left, active, expired: today > to };
+}
+ 
+function renderRecords() {
+  const f = $("recFilter").value;
+  const box = $("recList");
+  box.innerHTML = "";
+  const list = records.filter(r => {
+    const p = periodInfo(r);
+    if (f === "valid") return p.active;
+    if (f === "soon") return p.active && p.left <= 30;
+    if (f === "expired") return p.expired;
+    return true;
+  }).sort((a, b) => b.applied.localeCompare(a.applied) || a.key.localeCompare(b.key));
+ 
+  list.forEach(r => {
+    const p = periodInfo(r);
+    const div = document.createElement("div");
+    div.className = "item";
+    const title = document.createElement("div");
+    title.textContent = `${r.id}${r.part ? " (" + r.part + ")" : ""} · ${r.addr}${r.extra ? " 외 " + r.extra + "구역" : ""}`;
+    const sub = document.createElement("span");
+    sub.className = "addr";
+    sub.textContent = `${r.applied} ~ ${r.validTo} · ${p.label}` + (r.extra ? " · 구역 표 복사 필요" : "");
+    const del = document.createElement("button");
+    del.textContent = "삭제";
+    del.onclick = () => {
+      records = records.filter(x => x.key !== r.key);
+      saveRecords(); renderRecords();
+    };
+    div.append(title, sub, del);
+    box.appendChild(div);
+  });
+  return list.length;
+}
+ 
+function mergeRecords(items, onlyDone) {
+  let added = 0, updated = 0, skipped = 0;
+  items.forEach(p => {
+    if (onlyDone && p.status !== "처리완료") { skipped++; return; }
+    const i = records.findIndex(r => r.key === p.key);
+    if (i >= 0) { records[i] = { ...records[i], ...p }; updated++; }
+    else { records.push(p); added++; }
+  });
+  saveRecords();
+  return { added, updated, skipped };
+}
+ 
+$("listImport").onclick = () => {
+  const parsed = parseList($("listInput").value);
+  if (!parsed.length) return setStatus("읽을 행이 없습니다. 머리글을 포함해서 복사했는지 확인하세요.");
+  const r = mergeRecords(parsed, $("onlyDone").checked);
+  const shown = renderRecords();
+  setStatus(`추가 ${r.added}건, 갱신 ${r.updated}건, 제외 ${r.skipped}건 (표시 ${shown}건)`);
+};
+ 
+$("recFilter").onchange = () => renderRecords();
+ 
+$("exportBtn").onclick = () => {
+  const blob = new Blob([JSON.stringify(records, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `drone-records-${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+};
+ 
+$("importFile").onchange = async e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  try {
+    const arr = JSON.parse(await f.text());
+    const r = mergeRecords(arr, false);
+    const shown = renderRecords();
+    setStatus(`파일에서 ${arr.length}건 읽음 (추가 ${r.added}, 갱신 ${r.updated}, 표시 ${shown}건)`);
+  } catch (err) {
+    setStatus("파일 형식이 올바르지 않습니다.");
+  }
+  e.target.value = "";
+};
+ 
+renderRecords();
+ 
 // ===== 실행 =====
 $("run").onclick = async () => {
   const lines = $("input").value.split("\n").map(l => l.trim()).filter(Boolean);
@@ -316,3 +473,4 @@ $("clear").onclick = () => { zoneSource.clear(); $("list").innerHTML = ""; setSt
 </script>
 </body>
 </html>
+ 
